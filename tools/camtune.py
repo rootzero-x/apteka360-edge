@@ -19,7 +19,11 @@ for p in sorted(paths, key=lambda x: x["name"]):
     pm = U.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, "http://%s/" % u.hostname, P.unquote(u.username or ""), P.unquote(u.password))
     op = U.build_opener(U.HTTPDigestAuthHandler(pm))
-    for ch, (fps, cap, gop) in target.items():
+    # NVR orqali: /Streaming/Channels/<N>02 → N-kanal (N01 asosiy, N02 sub); oddiy kamera: 101 / 102
+    m = re.search(r"/Streaming/Channels/(\d+)0[12]\b", u.path, re.I)
+    n = m.group(1) if m else "1"
+    for kind, (fps, cap, gop) in target.items():
+        ch = n + kind[-2:]
         url = "http://%s/ISAPI/Streaming/channels/%s" % (u.hostname, ch)
         for attempt in range(3):
             try:
