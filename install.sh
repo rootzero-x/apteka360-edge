@@ -13,7 +13,18 @@ apt-get install -y -qq curl ca-certificates python3 zenity policykit-1 >/dev/nul
 
 echo "== Ilova yuklanmoqda"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-curl -fsSL --retry 5 -o "$TMP/app.tar.gz" "$REL/apteka360-edge-app.tar.gz"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo /nonexistent)"
+if [ -f "$HERE/apteka360-edge-app.tar.gz" ]; then
+  # Fleshka/papkadan: ilova va (bo'lsa) image'lar internetsiz
+  cp "$HERE/apteka360-edge-app.tar.gz" "$TMP/app.tar.gz"
+  if [ -f "$HERE/images.tar.gz" ] && [ -f "$HERE/images.tar.gz.sha256" ]; then
+    mkdir -p /var/lib/apteka360-edge
+    cp "$HERE/images.tar.gz.sha256" /var/lib/apteka360-edge/
+    cp "$HERE/images.tar.gz" /var/lib/apteka360-edge/images.tar.gz
+  fi
+else
+  curl -fsSL --retry 5 -o "$TMP/app.tar.gz" "$REL/apteka360-edge-app.tar.gz"
+fi
 mkdir -p "$DEST"
 # Sozlamalar (edge_agent.ini, yozuvlar, AI ma'lumotlari) qayta o'rnatishda saqlanadi
 tar -xzf "$TMP/app.tar.gz" -C "$DEST" --skip-old-files

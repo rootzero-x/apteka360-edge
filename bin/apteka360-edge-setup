@@ -67,7 +67,11 @@ def ensure_images(progress):
         return
     os.makedirs(STATE, exist_ok=True)
     tgz = STATE + "/images.tar.gz"
-    want = urllib.request.urlopen(RELEASE + "/images.tar.gz.sha256", timeout=30).read().decode().split()[0]
+    local_sum = STATE + "/images.tar.gz.sha256"  # install.sh lokal papkadan qo'ygan bo'lsa (internetsiz)
+    if os.path.exists(local_sum):
+        want = open(local_sum).read().split()[0]
+    else:
+        want = urllib.request.urlopen(RELEASE + "/images.tar.gz.sha256", timeout=30).read().decode().split()[0]
     for attempt in range(1, 31):  # uzilsa davom etadi (-C -)
         progress("Docker image'lar yuklanmoqda (~1 GB, urinish %d)…" % attempt)
         subprocess.run(["curl", "-fL", "-C", "-", "--retry", "5", "--retry-delay", "5", "-s", "-o", tgz, RELEASE + "/images.tar.gz"])
