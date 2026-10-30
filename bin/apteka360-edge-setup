@@ -198,7 +198,7 @@ def tune():
 
 def status():
     ready, total = paths_ready()
-    names = run(["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"], check=False).stdout.splitlines()
+    names = [l for l in run(["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"], check=False).stdout.splitlines() if l.startswith("apteka360-edge")]
     tunnel = ""
     try:
         tunnel = json.load(urllib.request.urlopen("http://127.0.0.1:20241/quicktunnel", timeout=3)).get("hostname", "")
