@@ -1,0 +1,33 @@
+# Apteka 360 Edge (bitta filial): MediaMTX + agent + tezkor tunnel. Ilova (apteka360-edge-setup) boshqaradi.
+# network_mode: host — kameralar LAN'i va ONVIF qidiruvi shundagina ishlaydi.
+name: apteka360-edge
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.2
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+      - ./recordings:/recordings
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+
+  agent:
+    image: ghcr.io/rootzero-x/apteka360-edge-agent:1.2.1
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [mediamtx]
+    volumes:
+      - ./edge_agent.ini:/config/edge_agent.ini:ro
+      - ./recordings:/recordings:ro
+      - ../edge-ai/frames:/frames:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+
+  # Akkauntsiz tunnel (trycloudflare.com): manzil har qayta ishga tushganda o'zgaradi, agent uni metrics'dan o'zi oladi.
+  quicktunnel:
+    image: cloudflare/cloudflared:2025.9.1
+    network_mode: host
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:20241 --url http://127.0.0.1:8890
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro

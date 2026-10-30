@@ -1,0 +1,53 @@
+# MediaMTX for the Apteka 360 Edge agent. Cameras (paths cam-<id>) are added by edge_agent.py through the API below.
+# Viewers authenticate with the short-lived JWT of cameras.streamUrl, checked against the API JWKS
+# (edge_agent.py re-points authJWTJWKS when the key changes, so MediaMTX reloads it).
+logLevel: info
+
+authMethod: jwt
+authJWTJWKS: https://api.apteka360.uz/v1/integrations/edge/jwks.json
+authJWTClaimKey: mediamtx_permissions
+authJWTAudience: apteka360-media
+# The control API and RTSP listen on localhost only (the agent configures paths and grabs snapshots through them).
+# `publish` is excluded so the agent's ffmpeg (camera audio → AAC, edge_agent.py Transcoders) can publish cam-<id> over the
+# localhost RTSP port without a token; the proxy never forwards WHIP, RTMP/SRT are off, so nothing outside can publish.
+authJWTExclude:
+  - action: api
+  - action: publish
+    path: ~^cam-
+
+api: true
+apiAddress: 127.0.0.1:9997
+
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: false
+srt: false
+moq: false
+
+# Public access goes through the agent proxy (:8890), which turns ?jwt= into Authorization: Bearer.
+hls: true
+hlsAddress: 127.0.0.1:8888
+# fMP4: what hls.js and Safari play best; 1 s segments (the camera GOP decides the real length), 7 kept, muxers always on
+# so a viewer gets the first frame at once instead of waiting for the muxer to start (and the stream never "freezes" on muxer restarts).
+hlsVariant: fmp4
+hlsSegmentDuration: 1s
+hlsSegmentCount: 7
+hlsAlwaysRemux: true
+hlsMuxerCloseAfter: 60s
+hlsAllowOrigins: ["*"]
+
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcAllowOrigins: ["*"]
+# WebRTC media goes directly to the Edge: forward UDP/TCP 8189 on the router and list the public IP / domain here.
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcAdditionalHosts: []
+
+playback: false
+
+pathDefaults:
+  rtspTransport: tcp
+
+paths: {}

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Apteka 360 Edge — filial serverini o'rnatish va tiklash (root).
+
+  apteka360-edge-setup install <config.json>   # GUI beradi: {"api","branchId","branchName","edgeSecret"}
+  apteka360-edge-setup prepare                 # Docker + image'lar (install.sh chaqiradi)
+  apteka360-edge-setup up                      # bor sozlama bilan ko'tarish (watch timer chaqiradi)
+  apteka360-edge-setup tune                    # kameralarni qayta moslash
+  apteka360-edge-setup status                  # JSON holat (GUI uchun)
+
+Progress `NN# matn` qatorlari bilan chiqadi (zenity --progress shu formatni o'qiydi).
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+HOME = "/opt/apteka360-edge"
+STACK = HOME + "/stack"
+AGENT = STACK + "/edge-agent"
+AI = STACK + "/edge-ai"
+STATE = "/var/lib/apteka360-edge"
+RELEASE = "https://github.com/rootzero-x/apteka360-edge/releases/latest/download"
+IMAGES = ["ghcr.io/rootzero-x/apteka360-edge-agent:1.2.1", "ghcr.io/rootzero-x/apteka360-edge-ai:1.0.0",
+          "bluenviron/mediamtx:1.21.2", "cloudflare/cloudflared:2025.9.1"]
+NOBODY = 65534
+
+
+def say(pct, msg):
+    print("%d" % pct, flush=True)
+    print("# " + msg, flush=True)
+
+
+def run(cmd, check=True, **kw):
+    return subprocess.run(cmd, check=check, text=True, capture_output=True, **kw)
+
+
+def ok(cmd):
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def compose():
+    return ["docker", "compose"] if ok(["docker", "compose", "version"]) else ["docker-compose"]
+
+
+# ---------------------------------------------------------------- qadamlar
+def ensure_docker():
+    if ok(["docker", "info"]) and (ok(["docker", "compose", "version"]) or shutil.which("docker-compose")):
+        return
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    run(["apt-get", "update", "-qq"], env=env)
+    run(["apt-get", "install", "-y", "-qq", "docker.io", "ca-certificates", "curl"], env=env)
+    # Ubuntu: docker-compose-v2, Debian/Kali: docker-compose
+    if run(["apt-get", "install", "-y", "-qq", "docker-compose-v2"], check=False, env=env).returncode:
+        run(["apt-get", "install", "-y", "-qq", "docker-compose"], env=env)
+    run(["systemctl", "enable", "--now", "docker"])
+
+
+def have_images():
+    return all(ok(["docker", "image", "inspect", i]) for i in IMAGES)
+
+
+def ensure_images(progress):
+    if have_images():
+        return
+    os.makedirs(STATE, exist_ok=True)
+    tgz = STATE + "/images.tar.gz"
+    want = urllib.request.urlopen(RELEASE + "/images.tar.gz.sha256", timeout=30).read().decode().split()[0]
+    for attempt in range(1, 31):  # uzilsa davom etadi (-C -)
+        progress("Docker image'lar yuklanmoqda (~1 GB, urinish %d)…" % attempt)
+        subprocess.run(["curl", "-fL", "-C", "-", "--retry", "5", "--retry-delay", "5", "-s", "-o", tgz, RELEASE + "/images.tar.gz"])
+        got = run(["sha256sum", tgz]).stdout.split()[0] if os.path.exists(tgz) else ""
+        if got == want:
+            break
+        if attempt % 5 == 0 and os.path.exists(tgz):
+            os.remove(tgz)  # buzilgan bo'lsa boshidan
+        time.sleep(5)
+    else:
+        raise SystemExit("Image'larni yuklab bo'lmadi — internetni tekshiring")
+    progress("Image'lar Docker'ga yuklanmoqda…")
+    subprocess.run("gunzip -c %s | docker load" % tgz, shell=True, check=True, stdout=subprocess.DEVNULL)
+    os.remove(tgz)
+
+
+def write_config(cfg):
+    branch = cfg["branchId"]
+    ini = """; Apteka 360 Edge — apteka360-edge-setup yaratgan ({name})
+[api]
+url = {api}
+edge_secret = {secret}
+
+[edge]
+branch_id = {branch}
+edge_id = edge-{branch}
+media_url =
+media_url_from = http://127.0.0.1:20241/quicktunnel
+heartbeat_sec = 30
+sync_sec = 60
+
+[mediamtx]
+api = http://127.0.0.1:9997
+rtsp = rtsp://127.0.0.1:8554
+hls = http://127.0.0.1:8888
+webrtc = http://127.0.0.1:8889
+record_dir = /recordings
+retention_days = 14
+
+[proxy]
+listen = 0.0.0.0:8890
+frames_dir = /frames
+
+[audio]
+transcode = true
+talk_max_sec = 60
+isapi_port = 80
+""".format(name=cfg.get("branchName", branch), api=cfg["api"].rstrip("/"), secret=cfg["edgeSecret"], branch=branch)
+    path = AGENT + "/edge_agent.ini"
+    with open(path + ".new", "w") as f:
+        f.write(ini)
+    os.chown(path + ".new", 0, NOBODY)  # agent konteyneri `nobody` bo'lib o'qiydi
+    os.chmod(path + ".new", 0o640)
+    os.replace(path + ".new", path)
+    for d in (AGENT + "/recordings", AI + "/frames"):
+        os.makedirs(d, exist_ok=True)
+        os.chown(d, NOBODY, NOBODY)
+    os.makedirs(STATE, exist_ok=True)
+    meta = {k: cfg[k] for k in ("api", "branchId", "branchName") if k in cfg}
+    meta["installedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(STATE + "/branch.json", "w") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    try:
+        os.remove(STATE + "/tuned")
+    except FileNotFoundError:
+        pass
+
+
+def stop_legacy():
+    """Qo'lda o'rnatilgan eski Edge (edge-agent-*, edge-ai-*, edge-otan-polvon-*) bir xil portlarni band qiladi."""
+    names = run(["docker", "ps", "-a", "--format", "{{.Names}}"]).stdout.split()
+    old = [n for n in names if n.startswith(("edge-agent-", "edge-ai-", "edge-otan-polvon-", "edge-detskiy-"))]
+    if old:
+        run(["docker", "rm", "-f"] + old, check=False)
+
+
+def up():
+    dc = compose()
+    cpus = str(max(1, min(4, (os.cpu_count() or 2) // 2)))
+    run(dc + ["up", "-d", "--remove-orphans"], cwd=AGENT)
+    run(dc + ["up", "-d", "--remove-orphans"], cwd=AI, env=dict(os.environ, EDGE_AI_CPUS=cpus))
+
+
+def harden():
+    """O'chmaydi, uxlamaydi, Wi-Fi uzilsa qayta ulanadi."""
+    wifi = [l.split(":")[0] for l in run(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"], check=False).stdout.splitlines() if ":802-11-wireless" in l]
+    for name in wifi:
+        run(["nmcli", "con", "modify", name, "connection.autoconnect", "yes", "connection.autoconnect-retries", "0",
+             "802-11-wireless.powersave", "2"], check=False)
+    os.makedirs("/etc/NetworkManager/conf.d", exist_ok=True)
+    with open("/etc/NetworkManager/conf.d/90-apteka360-wifi.conf", "w") as f:
+        f.write("[connection]\nwifi.powersave = 2\n")
+    run(["systemctl", "mask", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target", "suspend-then-hibernate.target"], check=False)
+    os.makedirs("/etc/systemd/logind.conf.d", exist_ok=True)
+    with open("/etc/systemd/logind.conf.d/90-apteka360.conf", "w") as f:
+        f.write("[Login]\nHandleLidSwitch=ignore\nHandleLidSwitchExternalPower=ignore\nHandleSuspendKey=ignore\nHandleHibernateKey=ignore\nIdleAction=ignore\n")
+    run(["systemctl", "enable", "docker"], check=False)
+    run(["systemctl", "enable", "--now", "apteka360-edge-watch.timer"], check=False)
+
+
+def link_kind():
+    route = run(["ip", "route", "show", "default"], check=False).stdout.split()
+    dev = route[route.index("dev") + 1] if "dev" in route else ""
+    return "wifi" if dev.startswith("wl") else "lan"
+
+
+def paths_ready():
+    try:
+        items = json.load(urllib.request.urlopen("http://127.0.0.1:9997/v3/paths/list", timeout=5))["items"]
+    except Exception:  # noqa: BLE001
+        return 0, 0
+    main = [p for p in items if not p["name"].endswith("-sub")]
+    return sum(1 for p in main if p.get("ready")), len(main)
+
+
+def tune():
+    kind = link_kind()
+    run(["docker", "cp", HOME + "/tools/camtune.py", "apteka360-edge-agent-1:/tmp/camtune.py"])
+    out = run(["docker", "exec", "apteka360-edge-agent-1", "python3", "/tmp/camtune.py", kind], check=False).stdout
+    with open(STATE + "/tuned", "w") as f:
+        f.write(kind + "\n" + out)
+    return kind, out
+
+
+def status():
+    ready, total = paths_ready()
+    names = run(["docker", "ps", "--format", "{{.Names}}\t{{.Status}}"], check=False).stdout.splitlines()
+    tunnel = ""
+    try:
+        tunnel = json.load(urllib.request.urlopen("http://127.0.0.1:20241/quicktunnel", timeout=3)).get("hostname", "")
+    except Exception:  # noqa: BLE001
+        pass
+    branch = {}
+    if os.path.exists(STATE + "/branch.json"):
+        branch = json.load(open(STATE + "/branch.json"))
+    print(json.dumps({"branch": branch, "cameras": [ready, total], "containers": names, "tunnel": tunnel, "link": link_kind()}, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- buyruqlar
+def install(cfg_path):
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    os.remove(cfg_path)  # kalitli vaqtinchalik fayl
+    say(5, "Docker tekshirilmoqda…")
+    ensure_docker()
+    say(15, "Docker image'lar tekshirilmoqda…")
+    ensure_images(lambda m: say(30, m))
+    say(60, "Filial sozlamalari yozilmoqda: %s" % cfg.get("branchName", cfg["branchId"]))
+    stop_legacy()
+    write_config(cfg)
+    say(70, "Edge ishga tushirilmoqda…")
+    up()
+    say(78, "Kompyuter o'chmaydigan va Wi-Fi o'zi qayta ulanadigan qilinmoqda…")
+    harden()
+    for i in range(36):  # 3 daqiqagacha kameralarni kutamiz
+        ready, total = paths_ready()
+        say(80 + min(i, 10), "Kameralar ulanmoqda: %d / %d" % (ready, total))
+        if total and ready == total:
+            break
+        time.sleep(5)
+    say(92, "Kameralar Edge uchun moslanmoqda (H.264, 1 s kalit kadr, bitreyt)…")
+    kind, _ = tune()
+    ready, total = paths_ready()
+    say(100, "Tayyor: %d / %d kamera, tarmoq: %s" % (ready, total, "Wi-Fi" if kind == "wifi" else "LAN"))
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if os.geteuid() != 0 and cmd != "status":
+        raise SystemExit("root kerak: pkexec %s %s" % (sys.argv[0], cmd))
+    if cmd == "prepare":  # install.sh: Docker va image'lar oldindan (filial tanlashdan oldin)
+        ensure_docker()
+        ensure_images(lambda m: print(m, flush=True))
+    elif cmd == "install":
+        install(sys.argv[2])
+    elif cmd == "up":
+        if os.path.exists(AGENT + "/edge_agent.ini"):
+            up()
+            ready, total = paths_ready()
+            if total and ready == total and not os.path.exists(STATE + "/tuned"):
+                tune()
+    elif cmd == "tune":
+        print(tune()[1])
+    elif cmd == "status":
+        status()
+    else:
+        raise SystemExit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

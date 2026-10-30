@@ -1,0 +1,20 @@
+# Apteka 360 Edge-AI (CPU): odam/navbat/xodim monitoringi. edge-agent bilan bir kompyuterda.
+name: apteka360-edge-ai
+services:
+  edge-ai:
+    image: ghcr.io/rootzero-x/apteka360-edge-ai:1.0.0
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ../edge-agent/edge_agent.ini:/config/edge_agent.ini:ro
+      - ./edge_ai.ini:/config/edge_ai.ini:ro
+      - ./zones.json:/config/zones.json:ro
+      - ./models:/app/models:ro
+      - ./gallery:/app/gallery:ro
+      - ./frames:/app/frames
+      - ./data:/app/data
+      - ../edge-agent/resolv.conf:/etc/resolv.conf:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "${EDGE_AI_CPUS:-3}"

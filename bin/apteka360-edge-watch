@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Har 30 s (systemd timer): Wi-Fi/router tekshiruvi va Edge konteynerlarini ko'tarish.
+# Router 3 marta (≈90 s) javob bermasa — Wi-Fi qayta ulanadi; 10 marta (≈5 daqiqa) — NetworkManager qayta ishga tushadi.
+S=/run/apteka360-edge-netwatch.fails
+GW=$(ip route | awk '/^default/{print $3; exit}')
+if [ -n "$GW" ] && ping -c2 -W3 "$GW" >/dev/null 2>&1; then
+  echo 0 > $S
+else
+  n=$(( $(cat $S 2>/dev/null || echo 0) + 1 )); echo $n > $S
+  logger -t apteka360-edge "router javob bermadi ($n)"
+  if [ $n -ge 10 ]; then systemctl restart NetworkManager; echo 0 > $S
+  elif [ $n -ge 3 ]; then
+    nmcli radio wifi off; sleep 3; nmcli radio wifi on; sleep 10
+    W=$(nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1; exit}'); [ -n "$W" ] && nmcli con up "$W" >/dev/null 2>&1
+  fi
+fi
+systemctl is-active --quiet docker || systemctl start docker
+exec /opt/apteka360-edge/bin/apteka360-edge-setup up >/dev/null 2>&1

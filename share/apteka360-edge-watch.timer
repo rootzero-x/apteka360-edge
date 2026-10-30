@@ -1,0 +1,8 @@
+[Unit]
+Description=Apteka 360 Edge: kuzatuvchi (har 30 s)
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=30
+AccuracySec=5
+[Install]
+WantedBy=timers.target

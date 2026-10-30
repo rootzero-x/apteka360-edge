@@ -1,0 +1,9 @@
+dist/
+__pycache__/
+stack/edge-agent/edge_agent.ini
+stack/edge-agent/recordings/*
+!stack/edge-agent/recordings/.keep
+stack/edge-ai/frames/*
+stack/edge-ai/data/*
+!stack/edge-ai/frames/.keep
+!stack/edge-ai/data/.keep

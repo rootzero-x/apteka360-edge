@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Apteka 360 Edge
+Comment=Filial Edge serverini o'rnatish va kuzatish
+Exec=/opt/apteka360-edge/bin/apteka360-edge
+Icon=/opt/apteka360-edge/share/icon.svg
+Terminal=false
+Categories=System;Network;

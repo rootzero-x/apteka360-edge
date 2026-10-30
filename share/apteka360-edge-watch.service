@@ -1,0 +1,7 @@
+[Unit]
+Description=Apteka 360 Edge: kuzatuvchi (Wi-Fi, konteynerlar)
+After=network-online.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/opt/apteka360-edge/bin/apteka360-edge-watch
+TimeoutStartSec=120

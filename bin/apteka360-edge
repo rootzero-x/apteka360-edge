@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Apteka 360 Edge — filial serverini o'rnatish oynasi (foydalanuvchi sessiyasida, zenity oynalari).
+
+Oqim: login + parol → Telegram kodi → (yangi qurilma bo'lsa tasdiqlash) → filial tanlash → filial kaliti
+(GET /v1/edges/key, faqat Egasi / Super admin) → `pkexec apteka360-edge-setup install` progress bilan.
+O'rnatilgan bo'lsa — holat oynasi. Parol va tokenlar diskka yozilmaydi.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
+
+API = os.environ.get("A360_API", "https://api.apteka360.uz")
+SETUP = "/opt/apteka360-edge/bin/apteka360-edge-setup"
+TITLE = "Apteka 360 Edge"
+CONF = os.path.expanduser("~/.config/apteka360-edge")
+
+
+def zen(*args, input=None):
+    r = subprocess.run(["zenity", "--title", TITLE, "--width", "460"] + list(args), text=True, capture_output=True, input=input)
+    return r.returncode, r.stdout.strip()
+
+
+def error(msg):
+    zen("--error", "--text", msg)
+
+
+def info(msg):
+    zen("--info", "--text", msg)
+
+
+def device_id():
+    os.makedirs(CONF, exist_ok=True)
+    p = CONF + "/device-id"
+    if not os.path.exists(p):
+        with open(p, "w") as f:
+            f.write("edge-%s-%s" % (socket.gethostname(), uuid.uuid4()))
+    return open(p).read().strip()
+
+
+def call(method, path, body=None, token=None):
+    req = urllib.request.Request(API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json", "User-Agent": "Apteka360Edge/1.0 (Linux)"})
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read()
+            return json.loads(data) if data else {}
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error") or e.reason
+        except Exception:  # noqa: BLE001
+            msg = e.reason
+        raise RuntimeError("%s (HTTP %d)" % (msg, e.code))
+    except urllib.error.URLError as e:
+        raise RuntimeError("Serverga ulanib bo'lmadi: %s — internetni tekshiring" % e.reason)
+
+
+def login():
+    """→ accessToken. Bekor qilinsa None."""
+    while True:
+        rc, out = zen("--forms", "--text", "Egasi yoki Super admin hisobi bilan kiring", "--add-entry", "Login (email yoki telefon)",
+                      "--add-password", "Parol", "--separator", "\x1f")
+        if rc:
+            return None
+        parts = out.split("\x1f")
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            error("Login va parolni kiriting")
+            continue
+        try:
+            ch = call("POST", "/v1/auth/login", {"login": parts[0].strip(), "password": parts[1]})
+        except RuntimeError as e:
+            error(str(e))
+            continue
+        while True:
+            rc, code = zen("--entry", "--text", "Telegram'ga kelgan 6 xonali kodni kiriting:", "--hide-text")
+            if rc:
+                return None
+            try:
+                r = call("POST", "/v1/auth/otp", {"challengeId": ch["challengeId"], "code": code.strip(), "deviceId": device_id()})
+                break
+            except RuntimeError as e:
+                error(str(e))
+                if "muddati" in str(e) or "qulf" in str(e).lower():
+                    break
+        else:
+            continue
+        if "newDevice" in r:
+            d = r["newDevice"]
+            rc, _ = zen("--question", "--text", "Yangi qurilma: %s\n%s · %s\n\nBu siz — davom etamizmi?" % (d.get("device", ""), d.get("location", ""), d.get("ip", "")))
+            if rc:
+                return None
+            r = call("POST", "/v1/auth/device", {"confirmId": d["confirmId"], "decision": "trust"})
+        if "accessToken" in r:
+            role = (r.get("user") or {}).get("role")
+            if role not in ("OWNER", "SUPER_ADMIN"):
+                error("Edge o'rnatish faqat Egasi yoki Super admin uchun (sizning rolingiz: %s)" % role)
+                continue
+            return r["accessToken"]
+
+
+def choose_branch(token):
+    branches = call("GET", "/v1/branches", token=token)
+    if isinstance(branches, dict):
+        branches = branches.get("items") or branches.get("branches") or []
+    rows = []
+    for b in branches:
+        rows += [b.get("id", ""), b.get("name") or b.get("short") or b.get("id", ""), b.get("address") or ""]
+    rc, out = zen("--list", "--height", "420", "--text", "Shu kompyuter qaysi filialning Edge serveri bo'ladi?",
+                  "--column", "ID", "--column", "Filial", "--column", "Manzil", *rows)
+    if rc or not out:
+        return None
+    bid = out.split("|")[0]
+    name = next((b.get("name") or bid for b in branches if b.get("id") == bid), bid)
+    return bid, name
+
+
+def install():
+    token = login()
+    if not token:
+        return
+    picked = choose_branch(token)
+    if not picked:
+        return
+    bid, name = picked
+    try:
+        key = call("GET", "/v1/edges/key?branchId=" + bid, token=token)
+    except RuntimeError as e:
+        error("Filial kalitini olib bo'lmadi: %s" % e)
+        return
+    fd, path = tempfile.mkstemp(prefix="a360-edge-", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump({"api": API, "branchId": bid, "branchName": name, "edgeSecret": key["edgeSecret"]}, f)
+    p = subprocess.Popen(["pkexec", SETUP, "install", path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    z = subprocess.Popen(["zenity", "--progress", "--title", TITLE, "--width", "520", "--text", "Boshlanmoqda…", "--percentage", "0", "--auto-close", "--no-cancel"],
+                         stdin=subprocess.PIPE, text=True)
+    last = ""
+    for line in p.stdout:
+        last = line.strip() or last
+        try:
+            z.stdin.write(line)
+            z.stdin.flush()
+        except BrokenPipeError:
+            pass
+    p.wait()
+    try:
+        z.stdin.close()
+    except BrokenPipeError:
+        pass
+    z.wait()
+    if os.path.exists(path):
+        os.remove(path)
+    if p.returncode:
+        error("O'rnatishda xato:\n%s\n\nLoglar: journalctl -t apteka360-edge" % last)
+        return
+    info("✅ %s filiali Edge serveri ishga tushdi.\n\n%s\n\nKompyuter o'chib-yonsa yoki Wi-Fi uzilsa ham hammasi o'zi tiklanadi." % (name, last.lstrip("# ")))
+    status()
+
+
+def status():
+    try:
+        s = json.loads(subprocess.run([SETUP, "status"], text=True, capture_output=True).stdout or "{}")
+    except Exception:  # noqa: BLE001
+        s = {}
+    if not s:  # root bo'lmasa status ham pkexec talab qilishi mumkin
+        s = json.loads(subprocess.run(["pkexec", SETUP, "status"], text=True, capture_output=True).stdout or "{}")
+    b = s.get("branch") or {}
+    ready, total = (s.get("cameras") or [0, 0])
+    text = "Filial: %s (%s)\nKameralar: %d / %d tayyor\nTarmoq: %s\nTunnel: %s\n\n%s" % (
+        b.get("branchName", "—"), b.get("branchId", "—"), ready, total, "Wi-Fi" if s.get("link") == "wifi" else "LAN",
+        s.get("tunnel") or "—", "\n".join(s.get("containers") or []))
+    rc, out = zen("--list", "--height", "460", "--text", text, "--column", "Amal",
+                  "Yangilash (holatni qayta o'qish)", "Edge'ni qayta ishga tushirish", "Kameralarni qayta moslash", "Filialni almashtirish / qayta o'rnatish")
+    if rc or not out:
+        return
+    if out.startswith("Yangilash"):
+        status()
+    elif out.startswith("Edge'ni"):
+        subprocess.run(["pkexec", SETUP, "up"])
+        status()
+    elif out.startswith("Kameralarni"):
+        r = subprocess.run(["pkexec", SETUP, "tune"], text=True, capture_output=True)
+        info(r.stdout[-1500:] or r.stderr[-500:] or "Bajarildi")
+        status()
+    else:
+        install()
+
+
+def main():
+    if not os.path.exists(SETUP):
+        print("O'rnatilmagan: %s yo'q" % SETUP, file=sys.stderr)
+        sys.exit(1)
+    if os.path.exists("/opt/apteka360-edge/stack/edge-agent/edge_agent.ini") and "--setup" not in sys.argv:
+        status()
+    else:
+        install()
+
+
+if __name__ == "__main__":
+    main()
